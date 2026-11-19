@@ -1,9 +1,9 @@
 {
-  "name": "omp-claude-code",
-  "version": "0.1.0",
-  "description": "omp provider that drives the official Claude Code CLI (claude -p) using its own login.",
+  "name": "omp-cc-driver",
+  "version": "0.2.0",
+  "description": "omp provider that runs the official claude CLI (Claude Code) with your own login. Not affiliated with Anthropic.",
   "type": "module",
-  "keywords": ["omp", "pi-package", "claude-code", "provider"],
+  "keywords": ["omp", "pi-package", "provider"],
   "license": "MIT",
   "omp": { "extensions": ["./extensions/index.ts"] },
   "files": ["extensions", "README.md", "LICENSE"]

@@ -10,20 +10,33 @@
 // - One user prompt = one child process. No retry loops, no background polling,
 //   bounded concurrency. A rate-limit rejection is surfaced as an error, not retried.
 // - The child owns its tool loop (Read/Edit/Bash...). omp tools are not exposed to it.
+// - Usage stays ordinary and individual (guardrails below): only the main conversation is
+//   served, background roles may not use this provider, cache warming never spawns a run,
+//   and unattended chains (goal/loop modes, subagents) pause after a fixed number of runs.
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
 
-const PROVIDER = "claude-code";
-const API = "claude-code-cli";
-const CLAUDE_BIN = process.env.OMP_CLAUDE_BIN ?? "claude";
+const PROVIDER = "cc";
+const API = "cc-cli";
+// Roles that are the user's own conversation. Every other role (smol, commit, judge, task,
+// vision, ...) is background work omp starts by itself, so it must use another provider.
+const INTERACTIVE_ROLES = new Set(["default", "plan", "slow"]);
+const requestedUnattended = Number(process.env.OMP_CC_MAX_UNATTENDED_RUNS ?? 20);
+const MAX_UNATTENDED_RUNS =
+	Number.isInteger(requestedUnattended) && requestedUnattended > 0 ? requestedUnattended : 20;
+// Runs started since the user last typed something. Module-level, so subagents share it.
+let runsSinceUserInput = 0;
+let readRoles: () => Record<string, string> = () => ({});
+const CLAUDE_BIN = process.env.OMP_CC_BIN ?? "claude";
 // acceptEdits: file edits allowed, other tools only if already allowed in Claude settings.
 // Headless mode cannot prompt, so anything else is denied rather than silently approved.
-const PERMISSION_MODE = process.env.OMP_CLAUDE_PERMISSION_MODE ?? "acceptEdits";
-const requestedConcurrency = Number(process.env.OMP_CLAUDE_MAX_CONCURRENT ?? 2);
+const PERMISSION_MODE = process.env.OMP_CC_PERMISSION_MODE ?? "acceptEdits";
+const requestedConcurrency = Number(process.env.OMP_CC_MAX_CONCURRENT ?? 1);
 // A typo here (NaN) would otherwise disable the cap entirely.
-const MAX_CONCURRENT = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0 ? requestedConcurrency : 2;
+const MAX_CONCURRENT = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0 ? requestedConcurrency : 1;
 // Claude Code already retries transient API failures itself. omp's session retries any
 // error whose text matches wording like this, which would re-launch `claude` against a
 // spent plan, so such details are logged instead of shown in the error text.
@@ -67,7 +80,7 @@ const SPECS: Spec[] = [
 
 const MODELS = SPECS.map((s) => ({
 	id: s.id,
-	name: `Claude Code · ${s.name}`,
+	name: `${s.name} (claude CLI)`,
 	reasoning: true,
 	thinking: { mode: "effort", efforts: [...s.efforts], defaultLevel: s.defaultLevel } as any,
 	input: ["text"] as ["text"],
@@ -143,6 +156,24 @@ function emptyMessage(model: any): any {
 	};
 }
 
+// Returns why this request must not start a `claude` run, or undefined when it may.
+// Messages avoid retry wording (see RETRY_BAIT) so omp does not re-send them.
+function guardrailRefusal(options: any): string | undefined {
+	const backgroundRoles = Object.entries(readRoles())
+		.filter(([role, model]) => !INTERACTIVE_ROLES.has(role) && String(model).startsWith(`${PROVIDER}/`))
+		.map(([role]) => role);
+	if (backgroundRoles.length > 0) {
+		return `The ${PROVIDER} provider is off while background roles point at it (${backgroundRoles.join(", ")}). Set those roles to another provider in config.yml; only default, plan and slow may use ${PROVIDER}.`;
+	}
+	if (options?.parentSessionId) {
+		return `The ${PROVIDER} provider only answers your own conversation, not omp side requests. Use another provider for that feature.`;
+	}
+	if (runsSinceUserInput >= MAX_UNATTENDED_RUNS) {
+		return `Paused: ${runsSinceUserInput} claude runs since your last message. Send a message to continue (cap: OMP_CC_MAX_UNATTENDED_RUNS).`;
+	}
+	return undefined;
+}
+
 async function run(stream: AssistantMessageEventStream, model: any, context: any, options: any): Promise<void> {
 	const out = emptyMessage(model);
 	const fail = (reason: "error" | "aborted", message: string) => {
@@ -152,11 +183,23 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 		stream.end();
 	};
 
+	// Cache pre-warm: answering it would spawn a full `claude` run for nothing.
+	if (options?.prewarm) {
+		out.stopReason = "length";
+		stream.push({ type: "start", partial: out });
+		stream.push({ type: "done", reason: "length", message: out });
+		stream.end();
+		return;
+	}
+	const refusal = guardrailRefusal(options);
+	if (refusal) return fail("error", refusal);
+
 	try {
 		await acquire(options?.signal);
 	} catch {
 		return fail("aborted", "aborted before start");
 	}
+	runsSinceUserInput++;
 
 	const sessionKey: string = options?.sessionId ?? "default";
 	let session = sessions.get(sessionKey);
@@ -266,13 +309,13 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	if (options?.signal?.aborted) return fail("aborted", "aborted");
 	if (code !== 0 || resultEvent?.is_error) {
 		const detail = String(resultEvent?.result ?? stderr.trim() ?? "").slice(0, 2000);
-		logger?.warn?.("claude-code driver: claude run failed", { exitCode: code, detail });
+		logger?.warn?.("cc driver: claude run failed", { exitCode: code, detail });
 		if (planResetsAt) {
 			const when = new Date(planResetsAt * 1000).toLocaleString();
-			return fail("error", `Claude plan allowance spent; it resets ${when}. The claude-code driver does not re-send.`);
+			return fail("error", `Claude plan allowance spent; it resets ${when}. The cc driver does not re-send.`);
 		}
 		const shown = detail && !RETRY_BAIT.test(detail) ? detail : "details are in the omp log";
-		return fail("error", `claude stopped (exit ${code}): ${shown}. The claude-code driver does not re-send.`);
+		return fail("error", `claude stopped (exit ${code}): ${shown}. The cc driver does not re-send.`);
 	}
 
 	session.started = true;
@@ -289,8 +332,20 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 
 export default function (pi: ExtensionAPI) {
 	logger = pi.logger;
+	const rolesSetting = lookup("modelRoles");
+	readRoles = () => (rolesSetting?.get(pi.pi.settings) as Record<string, string> | undefined) ?? {};
+
+	// Typed or RPC-sent messages are the user; extension-injected ones are not.
+	pi.on("input", (event: any) => {
+		if (event.source !== "extension") runsSinceUserInput = 0;
+	});
+	// Never keep the prompt cache warm through this provider: each refresh is a full run.
+	pi.on("cache_warming_decision", (_event: any, ctx: any) =>
+		ctx?.model?.provider === PROVIDER ? { action: "stop" } : undefined,
+	);
+
 	pi.registerProvider(PROVIDER, {
-		baseUrl: "https://claude-code-cli.invalid/", // required metadata only; never contacted
+		baseUrl: "https://cc-cli.invalid/", // required metadata only; never contacted
 		apiKey: "unused-by-extension",
 		api: API,
 		streamSimple(model, context, options) {
