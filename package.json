@@ -1,0 +1,10 @@
+{
+  "name": "omp-claude-code",
+  "version": "0.1.0",
+  "description": "omp provider that drives the official Claude Code CLI (claude -p) using its own login.",
+  "type": "module",
+  "keywords": ["omp", "pi-package", "claude-code", "provider"],
+  "license": "MIT",
+  "omp": { "extensions": ["./extensions/index.ts"] },
+  "files": ["extensions", "README.md", "LICENSE"]
+}
