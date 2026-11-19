@@ -13,8 +13,11 @@
 // - Usage stays ordinary and individual (guardrails below): only the main conversation is
 //   served, background roles may not use this provider, cache warming never spawns a run,
 //   and unattended chains (goal/loop modes, subagents) pause after a fixed number of runs.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { lookup } from "@oh-my-pi/pi-coding-agent/config/registry";
@@ -90,9 +93,50 @@ const MODELS = SPECS.map((s) => ({
 	maxTokens: 32000,
 }));
 
-// omp session id -> Claude Code session. In-memory: after an omp restart the first turn
-// starts a fresh Claude session and replays the transcript as text.
-const sessions = new Map<string, { claudeId: string; started: boolean }>();
+// Session continuity. After each successful run a checkpoint is saved into the omp
+// session file: which Claude session holds the conversation, and a hash of the omp
+// transcript at that point. A later turn (even after an omp restart) resumes that Claude
+// session only when omp's transcript still starts with exactly that history, the
+// checkpoint is the newest one for its Claude session (so an edited/branched omp history
+// never resumes a Claude session holding turns omp no longer has), the cwd matches and
+// Claude's transcript file still exists. Otherwise a new Claude session starts and the
+// omp history is replayed as text.
+const CHECKPOINT_TYPE = "omp-cc-driver.checkpoint";
+type Checkpoint = { claudeId: string; hash: string; cwd: string; sessionId: string };
+const checkpoints = new Map<string, Checkpoint>(); // `${sessionId}:${hash}` -> checkpoint
+const newestHashByClaudeId = new Map<string, string>();
+// omp session id -> writer into that session's file (factories are bound once per session).
+const checkpointWriters = new Map<string, (cp: Checkpoint) => void>();
+
+function rememberCheckpoint(cp: Checkpoint): void {
+	checkpoints.set(`${cp.sessionId}:${cp.hash}`, cp);
+	newestHashByClaudeId.set(cp.claudeId, cp.hash);
+}
+
+function chainHash(previous: string, message: any): string {
+	return createHash("sha256").update(`${previous}\n${message.role}\0${textOf(message.content)}`).digest("hex");
+}
+
+// shortcut: mirrors Claude Code's project-dir naming; a mismatch only costs a replay, never a wrong resume.
+function claudeTranscriptExists(claudeId: string, cwd: string): boolean {
+	const configDir = process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
+	return existsSync(join(configDir, "projects", cwd.replace(/[^a-zA-Z0-9]/g, "-"), `${claudeId}.jsonl`));
+}
+
+// Finds a Claude session that can continue this transcript; returns it with the index of
+// the first omp message Claude has not seen yet.
+function findResumable(messages: any[], sessionId: string, cwd: string): { cp: Checkpoint; unseenFrom: number } | undefined {
+	const prefixHashes: string[] = [""];
+	for (const m of messages) prefixHashes.push(chainHash(prefixHashes.at(-1)!, m));
+	for (let seen = messages.length - 1; seen >= 1; seen--) {
+		const cp = checkpoints.get(`${sessionId}:${prefixHashes[seen]}`);
+		if (!cp) continue;
+		const usable =
+			newestHashByClaudeId.get(cp.claudeId) === cp.hash && cp.cwd === cwd && claudeTranscriptExists(cp.claudeId, cwd);
+		return usable ? { cp, unseenFrom: seen } : undefined;
+	}
+	return undefined;
+}
 
 let running = 0;
 const waiters: Array<() => void> = [];
@@ -117,10 +161,20 @@ function textOf(content: unknown): string {
 		.join("\n");
 }
 
+function labelled(m: any): string {
+	const label = m.role === "user" ? "User" : m.role === "assistant" ? "Assistant" : m.role;
+	return `${label}: ${textOf(m.content)}`;
+}
+
+// Text for messages Claude has not seen in the resumed session (normally one user message).
+function buildResumePrompt(unseen: any[]): string {
+	return unseen.length === 1 ? textOf(unseen[0].content) : unseen.map(labelled).join("\n\n");
+}
+
 // shortcut: replay is plain text without tool calls, fine for resuming a chat; upgrade if exact fidelity matters.
-function buildPrompt(messages: any[], resuming: boolean): string {
+function buildReplayPrompt(messages: any[]): string {
 	const last = messages.at(-1);
-	if (resuming || messages.length <= 1) return textOf(last?.content);
+	if (messages.length <= 1) return textOf(last?.content);
 	const history = messages
 		.slice(0, -1)
 		.filter((m) => m.role === "user" || m.role === "assistant")
@@ -202,13 +256,12 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	}
 	runsSinceUserInput++;
 
-	const sessionKey: string = options?.sessionId ?? "default";
-	let session = sessions.get(sessionKey);
-	const resuming = !!session?.started;
-	if (!session) {
-		session = { claudeId: randomUUID(), started: false };
-		sessions.set(sessionKey, session);
-	}
+	const sessionId: string = options?.sessionId ?? "default";
+	const cwd: string = options?.cwd ?? process.cwd();
+	const messages: any[] = context.messages;
+	const resumable = findResumable(messages, sessionId, cwd);
+	const claudeId = resumable?.cp.claudeId ?? randomUUID();
+	const prompt = resumable ? buildResumePrompt(messages.slice(resumable.unseenFrom)) : buildReplayPrompt(messages);
 
 	const args = [
 		"-p",
@@ -220,16 +273,16 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 		model.id,
 		"--permission-mode",
 		PERMISSION_MODE,
-		...(resuming ? ["--resume", session.claudeId] : ["--session-id", session.claudeId]),
+		...(resumable ? ["--resume", claudeId] : ["--session-id", claudeId]),
 	];
 	if (options?.reasoning) args.push("--effort", options.reasoning === "minimal" ? "low" : options.reasoning);
 
-	const child = spawn(CLAUDE_BIN, args, { cwd: options?.cwd ?? process.cwd(), env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
+	const child = spawn(CLAUDE_BIN, args, { cwd, env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
 	const onAbort = () => child.kill("SIGTERM");
 	options?.signal?.addEventListener("abort", onAbort, { once: true });
 
 	stream.push({ type: "start", partial: out });
-	child.stdin.end(buildPrompt(context.messages, resuming));
+	child.stdin.end(prompt);
 
 	// Claude block key "<messageId>:<index>" -> omp content index.
 	const blockMap = new Map<string, { idx: number; kind: "text" | "thinking" | "tool"; json: string; name?: string }>();
@@ -326,7 +379,12 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 		return fail("error", `claude stopped (exit ${code}): ${shown}. The cc driver does not re-send.`);
 	}
 
-	session.started = true;
+	// Checkpoint = transcript including this reply, as omp will send it next turn.
+	let hash = "";
+	for (const m of [...messages, out]) hash = chainHash(hash, m);
+	const checkpoint: Checkpoint = { claudeId, hash, cwd, sessionId };
+	rememberCheckpoint(checkpoint);
+	checkpointWriters.get(sessionId)?.(checkpoint);
 	const runTotal = resultEvent?.usage ?? {};
 	const contextUsage = lastRequestUsage ?? runTotal;
 	out.usage.input = contextUsage.input_tokens ?? 0;
@@ -343,6 +401,22 @@ export default function (pi: ExtensionAPI) {
 	logger = pi.logger;
 	const rolesSetting = lookup("modelRoles");
 	readRoles = () => (rolesSetting?.get(pi.pi.settings) as Record<string, string> | undefined) ?? {};
+
+	// Load checkpoints saved in this omp session (all branches, oldest first, so the
+	// newest per Claude session wins) and route new ones into this session's file.
+	const loadCheckpoints = (_event: any, ctx: any) => {
+		const sessionManager = ctx?.sessionManager;
+		if (!sessionManager) return;
+		for (const entry of sessionManager.getEntries()) {
+			if (entry.type === "custom" && entry.customType === CHECKPOINT_TYPE && entry.data?.claudeId) {
+				rememberCheckpoint(entry.data as Checkpoint);
+			}
+		}
+		checkpointWriters.set(sessionManager.getSessionId(), (cp) => pi.appendEntry(CHECKPOINT_TYPE, cp));
+	};
+	pi.on("session_start", loadCheckpoints);
+	pi.on("session_branch", loadCheckpoints);
+	pi.on("session_tree", loadCheckpoints);
 
 	// Typed or RPC-sent messages are the user; extension-injected ones are not.
 	pi.on("input", (event: any) => {

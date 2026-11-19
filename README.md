@@ -39,6 +39,9 @@ Anthropic's policy on subscription use in third-party tools can change; check cu
 | `OMP_CC_MAX_CONCURRENT` | `1` | parallel `claude` runs |
 | `OMP_CC_MAX_UNATTENDED_RUNS` | `20` | runs allowed between your messages |
 
-## Limits
+## Session continuity
 
-After an omp restart the first turn replays the earlier chat as plain text (no tool calls).
+After each reply a checkpoint (Claude session id + hash of the omp transcript) is saved in the omp session file.
+Later turns, including after `omp -c` / `-r`, resume the same Claude session when omp's history still matches it exactly.
+If the history was edited or branched, the cwd changed, or Claude's transcript is gone, a new Claude session starts
+and the omp history is replayed as plain text (no tool calls).
