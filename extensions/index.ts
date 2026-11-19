@@ -30,11 +30,12 @@ const MAX_UNATTENDED_RUNS =
 // Runs started since the user last typed something. Module-level, so subagents share it.
 let runsSinceUserInput = 0;
 let readRoles: () => Record<string, string> = () => ({});
-const CLAUDE_BIN = process.env.OMP_CC_BIN ?? "claude";
+// Pre-0.2 OMP_CLAUDE_* names still apply so a stricter setting is not silently dropped.
+const CLAUDE_BIN = process.env.OMP_CC_BIN ?? process.env.OMP_CLAUDE_BIN ?? "claude";
 // acceptEdits: file edits allowed, other tools only if already allowed in Claude settings.
 // Headless mode cannot prompt, so anything else is denied rather than silently approved.
-const PERMISSION_MODE = process.env.OMP_CC_PERMISSION_MODE ?? "acceptEdits";
-const requestedConcurrency = Number(process.env.OMP_CC_MAX_CONCURRENT ?? 1);
+const PERMISSION_MODE = process.env.OMP_CC_PERMISSION_MODE ?? process.env.OMP_CLAUDE_PERMISSION_MODE ?? "acceptEdits";
+const requestedConcurrency = Number(process.env.OMP_CC_MAX_CONCURRENT ?? process.env.OMP_CLAUDE_MAX_CONCURRENT ?? 1);
 // A typo here (NaN) would otherwise disable the cap entirely.
 const MAX_CONCURRENT = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0 ? requestedConcurrency : 1;
 // Claude Code already retries transient API failures itself. omp's session retries any
