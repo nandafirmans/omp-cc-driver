@@ -12,7 +12,7 @@ Then `omp --model claude-code/opus` (also `fable`, `sonnet`, `haiku`, or pinned 
 
 - Auth is whatever `claude` is logged into. Credentials are never read, copied or forwarded; no direct API calls.
 - `ANTHROPIC_*` and `CLAUDE_CODE_OAUTH*` env vars are stripped from the child.
-- One prompt = one child process, max 2 concurrent. No retries; rate-limit errors are surfaced.
+- One prompt = one child process, max 2 concurrent. No retries: Claude Code retries transient failures itself, and error text is worded so omp's own auto-retry does not re-launch `claude` (raw details go to the omp log).
 - Claude Code owns its tool loop; omp tools are not exposed to it.
 
 Anthropic's policy on subscription use in third-party tools can change; check current terms.

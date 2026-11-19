@@ -21,7 +21,14 @@ const CLAUDE_BIN = process.env.OMP_CLAUDE_BIN ?? "claude";
 // acceptEdits: file edits allowed, other tools only if already allowed in Claude settings.
 // Headless mode cannot prompt, so anything else is denied rather than silently approved.
 const PERMISSION_MODE = process.env.OMP_CLAUDE_PERMISSION_MODE ?? "acceptEdits";
-const MAX_CONCURRENT = Number(process.env.OMP_CLAUDE_MAX_CONCURRENT ?? 2);
+const requestedConcurrency = Number(process.env.OMP_CLAUDE_MAX_CONCURRENT ?? 2);
+// A typo here (NaN) would otherwise disable the cap entirely.
+const MAX_CONCURRENT = Number.isInteger(requestedConcurrency) && requestedConcurrency > 0 ? requestedConcurrency : 2;
+// Claude Code already retries transient API failures itself. omp's session retries any
+// error whose text matches wording like this, which would re-launch `claude` against a
+// spent plan, so such details are logged instead of shown in the error text.
+const RETRY_BAIT = /limit|rate|quota|usage|overload|capacity|time.?out|terminat|unavailable|server|internal|network|connect|socket|fetch|retry|stall|\b(?:4\d\d|5\d\d)\b/i;
+let logger: ExtensionAPI["logger"] | undefined;
 const STRIPPED_ENV_PREFIXES = ["ANTHROPIC_", "CLAUDE_CODE_OAUTH"];
 
 // Claude Code has no model-list command, so this table is static.
@@ -184,10 +191,14 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	const blockMap = new Map<string, { idx: number; kind: "text" | "thinking" | "tool"; json: string; name?: string }>();
 	let stderr = "";
 	let resultEvent: any;
+	let planResetsAt: number | undefined;
 	child.stderr.on("data", (d) => (stderr += d));
 
 	const handle = (ev: any) => {
 		if (ev.type === "result") resultEvent = ev;
+		if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") {
+			planResetsAt = ev.rate_limit_info.resetsAt;
+		}
 		if (ev.type !== "stream_event") return;
 		const e = ev.event;
 		const key = `${ev.api_message_id ?? ""}:${e.index}`;
@@ -254,8 +265,14 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 
 	if (options?.signal?.aborted) return fail("aborted", "aborted");
 	if (code !== 0 || resultEvent?.is_error) {
-		const reason = resultEvent?.result ?? (stderr.trim() || `claude exited with code ${code}`);
-		return fail("error", String(reason).slice(0, 2000));
+		const detail = String(resultEvent?.result ?? stderr.trim() ?? "").slice(0, 2000);
+		logger?.warn?.("claude-code driver: claude run failed", { exitCode: code, detail });
+		if (planResetsAt) {
+			const when = new Date(planResetsAt * 1000).toLocaleString();
+			return fail("error", `Claude plan allowance spent; it resets ${when}. The claude-code driver does not re-send.`);
+		}
+		const shown = detail && !RETRY_BAIT.test(detail) ? detail : "details are in the omp log";
+		return fail("error", `claude stopped (exit ${code}): ${shown}. The claude-code driver does not re-send.`);
 	}
 
 	session.started = true;
@@ -271,6 +288,7 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 }
 
 export default function (pi: ExtensionAPI) {
+	logger = pi.logger;
 	pi.registerProvider(PROVIDER, {
 		baseUrl: "https://claude-code-cli.invalid/", // required metadata only; never contacted
 		apiKey: "unused-by-extension",
