@@ -236,6 +236,9 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	let stderr = "";
 	let resultEvent: any;
 	let planResetsAt: number | undefined;
+	// Usage of the last main-agent API request: what the context actually holds now.
+	// The result event sums every request in the run, which overstates context size.
+	let lastRequestUsage: any;
 	child.stderr.on("data", (d) => (stderr += d));
 
 	const handle = (ev: any) => {
@@ -245,6 +248,10 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 		}
 		if (ev.type !== "stream_event") return;
 		const e = ev.event;
+		if (ev.parent_tool_use_id == null) {
+			if (e.type === "message_start") lastRequestUsage = { ...e.message?.usage };
+			else if (e.type === "message_delta" && e.usage && lastRequestUsage) Object.assign(lastRequestUsage, e.usage);
+		}
 		const key = `${ev.api_message_id ?? ""}:${e.index}`;
 		if (e.type === "content_block_start") {
 			const t = e.content_block.type;
@@ -320,11 +327,12 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	}
 
 	session.started = true;
-	const u = resultEvent?.usage ?? {};
-	out.usage.input = u.input_tokens ?? 0;
-	out.usage.output = u.output_tokens ?? 0;
-	out.usage.cacheRead = u.cache_read_input_tokens ?? 0;
-	out.usage.cacheWrite = u.cache_creation_input_tokens ?? 0;
+	const runTotal = resultEvent?.usage ?? {};
+	const contextUsage = lastRequestUsage ?? runTotal;
+	out.usage.input = contextUsage.input_tokens ?? 0;
+	out.usage.cacheRead = contextUsage.cache_read_input_tokens ?? 0;
+	out.usage.cacheWrite = contextUsage.cache_creation_input_tokens ?? 0;
+	out.usage.output = runTotal.output_tokens ?? contextUsage.output_tokens ?? 0;
 	out.usage.totalTokens = out.usage.input + out.usage.output + out.usage.cacheRead + out.usage.cacheWrite;
 	out.stopReason = resultEvent?.stop_reason === "max_tokens" ? "length" : "stop";
 	stream.push({ type: "done", reason: out.stopReason, message: out });
@@ -343,6 +351,11 @@ export default function (pi: ExtensionAPI) {
 	// Never keep the prompt cache warm through this provider: each refresh is a full run.
 	pi.on("cache_warming_decision", (_event: any, ctx: any) =>
 		ctx?.model?.provider === PROVIDER ? { action: "stop" } : undefined,
+	);
+	// Claude Code compacts its own session; an omp summary never reaches it (resumed turns
+	// send only the newest message) and would cost an extra run, so skip omp compaction.
+	pi.on("session_before_compact", (_event: any, ctx: any) =>
+		ctx?.model?.provider === PROVIDER ? { cancel: true } : undefined,
 	);
 
 	pi.registerProvider(PROVIDER, {

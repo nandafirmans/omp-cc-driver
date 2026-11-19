@@ -24,6 +24,7 @@ The model list and per-model effort levels are a static table (the CLI has no li
 | Background roles | Refuses every request while any role other than `default`, `plan`, `slow` (e.g. `smol`, `commit`, `judge`, `task`) points at `cc/…` |
 | Side requests | Refuses omp side requests (titles, judges and similar calls that branch off a session) |
 | Cache warming | Never runs; pre-warm requests return empty without starting `claude` |
+| omp compaction | Skipped while a `cc/…` model is active; Claude Code compacts its own session |
 | Unattended chains | Pauses after `OMP_CC_MAX_UNATTENDED_RUNS` runs (default 20) without a message from you (goal/loop modes, subagents) |
 | Concurrency | One `claude` run at a time per omp process (`OMP_CC_MAX_CONCURRENT`, default 1) |
 
