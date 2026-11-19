@@ -39,6 +39,11 @@ Anthropic's policy on subscription use in third-party tools can change; check cu
 | `OMP_CC_MAX_CONCURRENT` | `1` | parallel `claude` runs |
 | `OMP_CC_MAX_UNATTENDED_RUNS` | `20` | runs allowed between your messages |
 
+## Images
+
+Images in your message are passed to Claude (via `--input-format stream-json`). When history is replayed as text,
+only the newest message's images are sent; older ones appear as `[image omitted]`.
+
 ## Session continuity
 
 After each reply a checkpoint (Claude session id + hash of the omp transcript) is saved in the omp session file.

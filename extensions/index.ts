@@ -87,7 +87,7 @@ const MODELS = SPECS.map((s) => ({
 	name: `${s.name} (claude CLI)`,
 	reasoning: true,
 	thinking: { mode: "effort", efforts: [...s.efforts], defaultLevel: s.defaultLevel } as any,
-	input: ["text"] as ["text"],
+	input: ["text", "image"] as ["text", "image"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, // plan-billed, not per token
 	contextWindow: s.contextWindow,
 	maxTokens: 32000,
@@ -153,6 +153,14 @@ function release(): void {
 }
 
 type Block = { type: string; text?: string; content?: unknown };
+// Image blocks from these messages in Anthropic's base64 form, for the CLI's stream-json input.
+function imagesOf(messages: any[]): any[] {
+	return messages
+		.flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+		.filter((b: any) => b?.type === "image" && b.data && b.mimeType)
+		.map((b: any) => ({ type: "image", source: { type: "base64", media_type: b.mimeType, data: b.data } }));
+}
+
 function textOf(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -262,9 +270,20 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	const resumable = findResumable(messages, sessionId, cwd);
 	const claudeId = resumable?.cp.claudeId ?? randomUUID();
 	const prompt = resumable ? buildResumePrompt(messages.slice(resumable.unseenFrom)) : buildReplayPrompt(messages);
+	// Images Claude has not seen yet. On a replay only the newest message's images are sent;
+	// older ones stay as "[image omitted]" in the replayed text.
+	const images = imagesOf(resumable ? messages.slice(resumable.unseenFrom) : messages.slice(-1));
+	const userMessage = {
+		type: "user",
+		message: { role: "user", content: [{ type: "text", text: prompt }, ...images] },
+		parent_tool_use_id: null,
+		session_id: "",
+	};
 
 	const args = [
 		"-p",
+		"--input-format",
+		"stream-json",
 		"--output-format",
 		"stream-json",
 		"--verbose",
@@ -282,7 +301,7 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	options?.signal?.addEventListener("abort", onAbort, { once: true });
 
 	stream.push({ type: "start", partial: out });
-	child.stdin.end(prompt);
+	child.stdin.end(`${JSON.stringify(userMessage)}\n`);
 
 	// Claude block key "<messageId>:<index>" -> omp content index.
 	const blockMap = new Map<string, { idx: number; kind: "text" | "thinking" | "tool"; json: string; name?: string }>();
