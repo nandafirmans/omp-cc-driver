@@ -24,17 +24,48 @@ const PERMISSION_MODE = process.env.OMP_CLAUDE_PERMISSION_MODE ?? "acceptEdits";
 const MAX_CONCURRENT = Number(process.env.OMP_CLAUDE_MAX_CONCURRENT ?? 2);
 const STRIPPED_ENV_PREFIXES = ["ANTHROPIC_", "CLAUDE_CODE_OAUTH"];
 
-const MODELS = [
-	{ id: "fable", name: "Claude Code · Fable" },
-	{ id: "opus", name: "Claude Code · Opus" },
-	{ id: "sonnet", name: "Claude Code · Sonnet" },
-	{ id: "haiku", name: "Claude Code · Haiku" },
-].map((m) => ({
-	...m,
+// Claude Code has no model-list command, so this table is static.
+// Source: https://code.claude.com/docs/en/model-config (effort levels, 1M windows).
+// shortcut: hardcoded table, refresh when Anthropic ships a model.
+const EFFORTS_FULL = ["low", "medium", "high", "xhigh", "max"] as const;
+const EFFORTS_NO_XHIGH = ["low", "medium", "high", "max"] as const;
+const WINDOW_1M = 1_000_000;
+const WINDOW_200K = 200_000;
+
+type Spec = {
+	id: string;
+	name: string;
+	efforts: readonly string[];
+	defaultLevel: string;
+	contextWindow: number;
+};
+const SPECS: Spec[] = [
+	// Aliases follow whatever the CLI resolves them to (currently the 5.5 family).
+	{ id: "fable", name: "Fable (latest)", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	{ id: "opus", name: "Opus (latest)", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	{ id: "sonnet", name: "Sonnet (latest)", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	{ id: "haiku", name: "Haiku (latest)", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	// Pinned versions.
+	{ id: "claude-fable-5-2", name: "Fable 5.2", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	{ id: "claude-opus-5-5", name: "Opus 5.5", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	{ id: "claude-sonnet-5-5", name: "Sonnet 5.5", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	{ id: "claude-haiku-5-5", name: "Haiku 5.5", efforts: EFFORTS_FULL, defaultLevel: "medium", contextWindow: WINDOW_1M },
+	{ id: "claude-opus-5", name: "Opus 5", efforts: EFFORTS_FULL, defaultLevel: "high", contextWindow: WINDOW_1M },
+	{ id: "claude-sonnet-5", name: "Sonnet 5", efforts: EFFORTS_FULL, defaultLevel: "high", contextWindow: WINDOW_1M },
+	{ id: "claude-opus-4-8", name: "Opus 4.8", efforts: EFFORTS_FULL, defaultLevel: "high", contextWindow: WINDOW_1M },
+	{ id: "claude-opus-4-7", name: "Opus 4.7", efforts: EFFORTS_FULL, defaultLevel: "xhigh", contextWindow: WINDOW_1M },
+	{ id: "claude-opus-4-6", name: "Opus 4.6", efforts: EFFORTS_NO_XHIGH, defaultLevel: "high", contextWindow: WINDOW_200K },
+	{ id: "claude-sonnet-4-6", name: "Sonnet 4.6", efforts: EFFORTS_NO_XHIGH, defaultLevel: "high", contextWindow: WINDOW_200K },
+];
+
+const MODELS = SPECS.map((s) => ({
+	id: s.id,
+	name: `Claude Code · ${s.name}`,
 	reasoning: true,
+	thinking: { mode: "effort", efforts: [...s.efforts], defaultLevel: s.defaultLevel } as any,
 	input: ["text"] as ["text"],
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, // plan-billed, not per token
-	contextWindow: 200000,
+	contextWindow: s.contextWindow,
 	maxTokens: 32000,
 }));
 

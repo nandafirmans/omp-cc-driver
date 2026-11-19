@@ -6,7 +6,7 @@ omp provider that runs the official `claude` CLI in headless mode (`claude -p --
 
     omp plugin install https://github.com/nandafirmans/omp-claude-code
 
-Then `omp --model claude-code/opus` (also `fable`, `sonnet`, `haiku`).
+Then `omp --model claude-code/opus` (also `fable`, `sonnet`, `haiku`, or pinned ids like `claude-sonnet-5-5`). The model list and per-model effort levels are a static table (Claude Code has no list command); update it when new models ship.
 
 ## Compliance design
 
