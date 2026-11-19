@@ -27,6 +27,11 @@ The model list and per-model effort levels are a static table (the CLI has no li
 | omp compaction | Skipped while a `cc/…` model is active; Claude Code compacts its own session |
 | Unattended chains | Pauses after `OMP_CC_MAX_UNATTENDED_RUNS` runs (default 20) without a message from you (goal/loop modes, subagents) |
 | Concurrency | One `claude` run at a time per omp process (`OMP_CC_MAX_CONCURRENT`, default 1) |
+| omp exit | A running `claude` is stopped when omp exits, so no run continues unattended |
+
+## Plan usage
+
+The omp footer shows Claude plan usage after each `cc/…` turn, e.g. `claude 5h 52% ↻Thu 07:30 PM · 7d 60% ↻Sun 05:00 PM`. It is read from the `rate_limit_event` that `claude -p` already prints; no extra request is made and no credentials are read. `omp usage` does not list it, because omp holds no Claude login.
 
 Anthropic's policy on subscription use in third-party tools can change; check current terms.
 

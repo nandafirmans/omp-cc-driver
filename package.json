@@ -1,6 +1,6 @@
 {
   "name": "omp-cc-driver",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "omp provider that runs the official claude CLI (Claude Code) with your own login. Not affiliated with Anthropic.",
   "type": "module",
   "keywords": ["omp", "pi-package", "provider"],

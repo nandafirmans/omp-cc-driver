@@ -237,6 +237,29 @@ function guardrailRefusal(options: any): string | undefined {
 	return undefined;
 }
 
+// Claude runs in flight; stopped when omp exits so no run continues unattended.
+const runningChildren = new Set<ReturnType<typeof spawn>>();
+process.once("exit", () => {
+	for (const child of runningChildren) child.kill("SIGTERM");
+});
+
+// Latest Claude plan usage line, read from the CLI's own rate_limit_event output.
+let planStatus: string | undefined;
+const WINDOW_LABELS: Record<string, string> = { five_hour: "5h", seven_day: "7d" };
+
+function formatPlanStatus(info: any): string | undefined {
+	if (!info) return undefined;
+	const windows = Object.entries<any>(info.unifiedWindows ?? {});
+	if (windows.length === 0) return `claude plan: ${info.status}`;
+	const parts = windows.map(([key, w]) => {
+		const pct = Math.round((w.utilization ?? 0) * 100);
+		const resets = w.resetsAt ? ` ↻${new Date(w.resetsAt * 1000).toLocaleString([], { weekday: "short", hour: "2-digit", minute: "2-digit" })}` : "";
+		const flag = w.status && w.status !== "allowed" ? ` ${w.status}` : "";
+		return `${WINDOW_LABELS[key] ?? key} ${pct}%${resets}${flag}`;
+	});
+	return `claude ${parts.join(" · ")}`;
+}
+
 async function run(stream: AssistantMessageEventStream, model: any, context: any, options: any): Promise<void> {
 	const out = emptyMessage(model);
 	const fail = (reason: "error" | "aborted", message: string) => {
@@ -299,6 +322,7 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 	const child = spawn(CLAUDE_BIN, args, { cwd, env: childEnv(), stdio: ["pipe", "pipe", "pipe"] });
 	const onAbort = () => child.kill("SIGTERM");
 	options?.signal?.addEventListener("abort", onAbort, { once: true });
+	runningChildren.add(child);
 
 	stream.push({ type: "start", partial: out });
 	child.stdin.end(`${JSON.stringify(userMessage)}\n`);
@@ -315,8 +339,9 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 
 	const handle = (ev: any) => {
 		if (ev.type === "result") resultEvent = ev;
-		if (ev.type === "rate_limit_event" && ev.rate_limit_info?.status === "rejected") {
-			planResetsAt = ev.rate_limit_info.resetsAt;
+		if (ev.type === "rate_limit_event") {
+			planStatus = formatPlanStatus(ev.rate_limit_info);
+			if (ev.rate_limit_info?.status === "rejected") planResetsAt = ev.rate_limit_info.resetsAt;
 		}
 		if (ev.type !== "stream_event") return;
 		const e = ev.event;
@@ -384,6 +409,7 @@ async function run(stream: AssistantMessageEventStream, model: any, context: any
 		child.on("close", resolve);
 	});
 	options?.signal?.removeEventListener("abort", onAbort);
+	runningChildren.delete(child);
 	release();
 
 	if (options?.signal?.aborted) return fail("aborted", "aborted");
@@ -440,6 +466,10 @@ export default function (pi: ExtensionAPI) {
 	// Typed or RPC-sent messages are the user; extension-injected ones are not.
 	pi.on("input", (event: any) => {
 		if (event.source !== "extension") runsSinceUserInput = 0;
+	});
+	// Footer status from the rate_limit_event Claude already emits; no extra request is made.
+	pi.on("turn_end", (_event: any, ctx: any) => {
+		if (planStatus && ctx?.hasUI) ctx.ui.setStatus("cc-plan", planStatus);
 	});
 	// Never keep the prompt cache warm through this provider: each refresh is a full run.
 	pi.on("cache_warming_decision", (_event: any, ctx: any) =>
